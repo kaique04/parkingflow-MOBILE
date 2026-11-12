@@ -1,7 +1,6 @@
 package com.riobranco.parkingflow.mobile
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,14 +24,15 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,13 +43,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.riobranco.parkingflow.mobile.ui.theme.TaskFlowMobileTheme
 import kotlinx.coroutines.launch
-import java.net.SocketTimeoutException
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +66,7 @@ private sealed class Tela {
     object Lista : Tela()
     data class Detalhe(val tarefa: Tarefa) : Tela()
     data class Formulario(val tarefaParaEditar: Tarefa?) : Tela()
+    object Faq : Tela()
 }
 
 private fun tarefaDoMapa(mapa: Map<String, Any?>): Tarefa? {
@@ -106,21 +106,24 @@ private val telaSaver = mapSaver(
                 "disciplina" to tela.tarefaParaEditar?.disciplina,
                 "dataEntrega" to tela.tarefaParaEditar?.dataEntrega
             )
+            is Tela.Faq -> mapOf("tipo" to "faq")
         }
     },
     restore = { mapa ->
         when (mapa["tipo"]) {
             "detalhe" -> tarefaDoMapa(mapa)?.let { Tela.Detalhe(it) } ?: Tela.Lista
             "formulario" -> Tela.Formulario(tarefaDoMapa(mapa))
+            "faq" -> Tela.Faq
             else -> Tela.Lista
         }
     }
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppTaskFlow() {
+    val viewModel: TarefaViewModel = viewModel()
     var telaAtual by rememberSaveable(stateSaver = telaSaver) { mutableStateOf<Tela>(Tela.Lista) }
-    var versaoLista by rememberSaveable { mutableStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
     val escopoSnackbar = rememberCoroutineScope()
 
@@ -132,6 +135,16 @@ fun AppTaskFlow() {
         is Tela.Lista -> {
             Scaffold(
                 modifier = Modifier.fillMaxSize(),
+                topBar = {
+                    TopAppBar(
+                        title = { Text("TaskFlow") },
+                        actions = {
+                            IconButton(onClick = { telaAtual = Tela.Faq }) {
+                                Text("❓", style = MaterialTheme.typography.titleLarge)
+                            }
+                        }
+                    )
+                },
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 floatingActionButton = {
                     FloatingActionButton(onClick = { telaAtual = Tela.Formulario(null) }) {
@@ -140,95 +153,55 @@ fun AppTaskFlow() {
                 }
             ) { innerPadding ->
                 TelaListaTarefas(
+                    viewModel = viewModel,
                     modifier = Modifier.padding(innerPadding),
-                    chaveAtualizacao = versaoLista,
                     onTarefaClick = { tarefa -> telaAtual = Tela.Detalhe(tarefa) }
                 )
             }
         }
         is Tela.Detalhe -> {
             TelaDetalheTarefa(
+                viewModel = viewModel,
                 tarefa = tela.tarefa,
                 onVoltar = { telaAtual = Tela.Lista },
                 onEditar = { telaAtual = Tela.Formulario(tela.tarefa) },
-                onExcluido = {
-                    versaoLista++
-                    telaAtual = Tela.Lista
-                },
+                onExcluido = { telaAtual = Tela.Lista },
                 mostrarSnackbar = mostrarSnackbar,
                 snackbarHostState = snackbarHostState
             )
         }
         is Tela.Formulario -> {
             TelaFormularioTarefa(
+                viewModel = viewModel,
                 tarefaParaEditar = tela.tarefaParaEditar,
-                onSalvar = {
-                    versaoLista++
-                    telaAtual = Tela.Lista
-                },
-                onCancelar = {
-                    telaAtual = tela.tarefaParaEditar?.let { Tela.Detalhe(it) } ?: Tela.Lista
-                },
+                onSalvar = { telaAtual = Tela.Lista },
+                onCancelar = { telaAtual = tela.tarefaParaEditar?.let { Tela.Detalhe(it) } ?: Tela.Lista },
                 mostrarSnackbar = mostrarSnackbar,
                 snackbarHostState = snackbarHostState
             )
+        }
+        is Tela.Faq -> {
+            TelaFaq(onVoltar = { telaAtual = Tela.Lista })
         }
     }
 }
 
 @Composable
 fun TelaListaTarefas(
+    viewModel: TarefaViewModel,
     modifier: Modifier = Modifier,
-    chaveAtualizacao: Int = 0,
     onTarefaClick: (Tarefa) -> Unit = {}
 ) {
-    val contexto = LocalContext.current
-    var tarefas by remember { mutableStateOf<List<Tarefa>>(emptyList()) }
-    var carregando by remember { mutableStateOf(true) }
-    var erro by remember { mutableStateOf<String?>(null) }
-    var tentativaManual by remember { mutableStateOf(0) }
     var filtroStatus by rememberSaveable { mutableStateOf<String?>(null) }
     var filtroPrioridade by rememberSaveable { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(chaveAtualizacao, tentativaManual) {
-        carregando = true
-        erro = null
-
-        if (!temConexaoInternet(contexto)) {
-            erro = "Sem conexão com a internet. Verifique sua rede e tente novamente."
-            carregando = false
-            return@LaunchedEffect
-        }
-
-        try {
-            val resposta = try {
-                RetrofitClient.api.listarTarefas()
-            } catch (e: SocketTimeoutException) {
-                Log.w("TaskFlowAPI", "Timeout na primeira tentativa (possível cold start do Azure), tentando de novo...")
-                RetrofitClient.api.listarTarefas()
-            }
-            if (resposta.isSuccessful) {
-                tarefas = resposta.body() ?: emptyList()
-            } else {
-                erro = "Erro ao buscar tarefas (HTTP ${resposta.code()})"
-            }
-        } catch (e: SocketTimeoutException) {
-            erro = "O servidor demorou demais pra responder (pode estar iniciando). Tente novamente em instantes."
-        } catch (e: Exception) {
-            erro = "Falha na conexão: ${e.message}"
-            Log.e("TaskFlowAPI", "Erro ao buscar tarefas", e)
-        } finally {
-            carregando = false
-        }
-    }
-
-    val tarefasFiltradas = tarefas.filter { tarefa ->
+    val tarefasFiltradas = viewModel.tarefas.filter { tarefa ->
         (filtroStatus == null || tarefa.status == filtroStatus) &&
                 (filtroPrioridade == null || tarefa.prioridade == filtroPrioridade)
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        if (!carregando && erro == null && tarefas.isNotEmpty()) {
+        if (!viewModel.carregandoLista && viewModel.erroLista == null && viewModel.tarefas.isNotEmpty()) {
             FiltrosDeLista(
                 filtroStatus = filtroStatus,
                 onFiltroStatusChange = { filtroStatus = it },
@@ -243,26 +216,26 @@ fun TelaListaTarefas(
                 .weight(1f)
         ) {
             when {
-                carregando -> {
+                viewModel.carregandoLista -> {
                     CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                 }
-                erro != null -> {
+                viewModel.erroLista != null -> {
                     Column(
                         modifier = Modifier
                             .align(Alignment.Center)
                             .padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text(text = erro ?: "Erro desconhecido", textAlign = TextAlign.Center)
+                        Text(text = viewModel.erroLista ?: "Erro desconhecido", textAlign = TextAlign.Center)
                         Button(
-                            onClick = { tentativaManual++ },
+                            onClick = { viewModel.carregarTarefas() },
                             modifier = Modifier.padding(top = 16.dp)
                         ) {
                             Text("Tentar novamente")
                         }
                     }
                 }
-                tarefas.isEmpty() -> {
+                viewModel.tarefas.isEmpty() -> {
                     Text(
                         text = "Nenhuma tarefa cadastrada ainda.",
                         modifier = Modifier.align(Alignment.Center)
